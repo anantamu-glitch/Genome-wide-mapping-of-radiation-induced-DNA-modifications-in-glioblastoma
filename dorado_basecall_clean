@@ -1,0 +1,75 @@
+#!/bin/bash
+#SBATCH --job-name=dorado_basecall
+#SBATCH --account=$ACCOUNT
+#SBATCH --partition=gpu
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=$EMAIL
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --gres=gpu:v100:1
+#SBATCH --time=48:00:00
+#SBATCH --output=$LOG_DIR/dorado_%j.out
+#SBATCH --error=$LOG_DIR/dorado_%j.err
+
+# Dorado basecalling script with simultaneous methylation calling
+# Produces a sorted, indexed BAM with MM/ML methylation tags
+#
+# Note: --gres=gpu:v100:1 requests a V100 GPU specifically.
+# This is required because dorado's CUDA kernels are not compatible
+# with older GPU architectures (e.g. P100).
+
+# ============================================================
+# USER CONFIGURATION — set these before running
+# ============================================================
+ACCOUNT=your_slurm_account
+EMAIL=your_email@university.edu
+LOG_DIR=/path/to/logs
+CONDA_ENV=/path/to/conda/env
+DORADO=/path/to/dorado/bin/dorado
+REFERENCE=/path/to/hg38/hg38.fa
+IN_DIR=/path/to/pod5/files
+BAM_DIR=/path/to/output/bam/directory
+SAMPLE_NAME=sample_name
+MODEL_DIR=/path/to/basecalling/model
+MOD_MODEL_5mCG=/path/to/5mCG_5hmCG/methylation/model
+MOD_MODEL_6mA=/path/to/6mA/methylation/model
+# ============================================================
+
+set -euo pipefail
+trap 'echo "[$(date)] ERROR at line ${LINENO}. Exiting."' ERR
+
+module load gcc/13.3.0
+module load cuda/12.6.3
+
+source ~/.bashrc
+conda activate "$CONDA_ENV"
+
+mkdir -p "$BAM_DIR" "$LOG_DIR"
+
+echo "[$(date)] Starting Dorado basecalling on $SAMPLE_NAME..."
+
+$DORADO basecaller \
+    $MODEL_DIR \
+    "$IN_DIR" \
+    --verbose \
+    --reference $REFERENCE \
+    --mm2-opts "-x map-ont" \
+    --modified-bases-models $MOD_MODEL_5mCG,$MOD_MODEL_6mA \
+    > $BAM_DIR/${SAMPLE_NAME}.unsorted.bam || { echo "[$(date)] ERROR: Dorado failed."; exit 1; }
+
+echo "[$(date)] Basecalling done. Sorting..."
+
+samtools sort \
+    -@ $SLURM_CPUS_PER_TASK \
+    -o $BAM_DIR/${SAMPLE_NAME}.bam \
+    $BAM_DIR/${SAMPLE_NAME}.unsorted.bam || { echo "[$(date)] ERROR: samtools sort failed."; exit 1; }
+
+echo "[$(date)] Sorting done. Indexing..."
+
+samtools index $BAM_DIR/${SAMPLE_NAME}.bam || { echo "[$(date)] ERROR: samtools index failed."; exit 1; }
+
+rm $BAM_DIR/${SAMPLE_NAME}.unsorted.bam
+
+echo "[$(date)] All done! Output: $BAM_DIR/${SAMPLE_NAME}.bam"
