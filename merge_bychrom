@@ -1,0 +1,46 @@
+#!/bin/bash
+# Merge per-chromosome ELIGOS2 results into one genome-wide file
+# Usage: bash merge_bychrom.sh <comparison>
+# Example: bash merge_bychrom.sh 8Gy_3hr
+
+# ============================================================
+# USER CONFIGURATION — set these before running
+# ============================================================
+OUT_BASE=/path/to/output    # same as OUT_BASE in eligos2_bychrom.sh
+# ============================================================
+
+set -euo pipefail
+
+COMPARISON=${1:?Usage: merge_bychrom.sh <comparison>}
+BASE_DIR=$OUT_BASE/${COMPARISON}_bychrom
+OUT_DIR=$OUT_BASE/${COMPARISON}_merged
+
+mkdir -p "$OUT_DIR"
+
+CHROMOSOMES="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19 chr20 chr21 chr22 chrX chrY chrM"
+
+for ext in baseExt0 baseExt1 baseExt2 combine; do
+    echo "[$(date)] Merging ${ext} files for $COMPARISON..."
+    OUT_FILE="$OUT_DIR/${COMPARISON}_${ext}_merged.txt"
+    header_written=0
+
+    for chr in $CHROMOSOMES; do
+        file=$(ls "$BASE_DIR/$chr/"*_${ext}.txt 2>/dev/null | head -1)
+        if [ -z "$file" ]; then
+            echo "  WARNING: no ${ext} file found for $chr, skipping"
+            continue
+        fi
+        if [ "$header_written" -eq 0 ]; then
+            head -1 "$file" > "$OUT_FILE"
+            header_written=1
+        fi
+        tail -n +2 "$file" >> "$OUT_FILE"
+        echo "  $chr: $(( $(wc -l < "$file") - 1 )) rows"
+    done
+
+    total=$(( $(wc -l < "$OUT_FILE") - 1 ))
+    echo "  Total rows in merged ${ext}: $total"
+    echo "  Output: $OUT_FILE"
+done
+
+echo "[$(date)] Merge complete! Results in $OUT_DIR"
