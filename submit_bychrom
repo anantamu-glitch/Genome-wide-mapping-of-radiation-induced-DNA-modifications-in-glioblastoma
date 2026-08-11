@@ -1,0 +1,34 @@
+#!/bin/bash
+# Submit per-chromosome ELIGOS2 jobs for both comparisons
+# Usage: bash submit_bychrom.sh
+#
+# This script submits 25 jobs per comparison (50 total), one per chromosome.
+# All jobs run in parallel on the cluster.
+# After all jobs finish, run merge_bychrom.sh to combine results.
+
+# ============================================================
+# USER CONFIGURATION — set these before running
+# ============================================================
+SCRIPT_DIR=/path/to/scripts   # directory containing eligos2_bychrom.sh
+# ============================================================
+
+CHROMOSOMES="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19 chr20 chr21 chr22 chrX chrY chrM"
+
+echo "Submitting 8Gy_3hr jobs..."
+for chr in $CHROMOSOMES; do
+    jobid=$(sbatch --parsable --job-name="eligos2_${chr}_8Gy" \
+        $SCRIPT_DIR/eligos2_bychrom.sh $chr 8Gy_3hr)
+    echo "  $chr -> job $jobid"
+done
+
+echo ""
+echo "Submitting 4Gy_2wk jobs..."
+for chr in $CHROMOSOMES; do
+    jobid=$(sbatch --parsable --job-name="eligos2_${chr}_4Gy" \
+        $SCRIPT_DIR/eligos2_bychrom.sh $chr 4Gy_2wk)
+    echo "  $chr -> job $jobid"
+done
+
+echo ""
+echo "All jobs submitted. Monitor with: squeue -u \$USER"
+echo "Once all jobs finish, run: bash merge_bychrom.sh 8Gy_3hr && bash merge_bychrom.sh 4Gy_2wk"
