@@ -1,0 +1,171 @@
+#!/bin/bash
+#SBATCH --job-name=eligos2_bychrom
+#SBATCH --account=$ACCOUNT
+#SBATCH --partition=main
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --mail-type=FAIL
+#SBATCH --mail-user=$EMAIL
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=94G
+#SBATCH --time=48:00:00
+#SBATCH --output=$LOG_DIR/eligos2_bychrom_%j.out
+#SBATCH --error=$LOG_DIR/eligos2_bychrom_%j.err
+
+# Usage: sbatch eligos2_bychrom.sh <chrom> <comparison>
+# Example: sbatch eligos2_bychrom.sh chr20 8Gy_3hr
+#
+# This script runs ELIGOS2 pair_diff_mod for one chromosome against a control.
+# The chromosome is split into 1MB chunks to keep memory usage ~20GB per job,
+# well within typical HPC node limits.
+#
+# Requirements:
+# - ELIGOS2 patched source (see README for patch details)
+# - Preprocessed and pooled BAMs (run map_preprocess and samtools merge first)
+# - hg38 reference genome with .fai index
+
+# ============================================================
+# USER CONFIGURATION — set these before running
+# ============================================================
+ACCOUNT=your_slurm_account
+EMAIL=your_email@university.edu
+REFERENCE=/path/to/hg38/hg38.fa
+CONDA_INIT=/path/to/conda/etc/profile.d/conda.sh
+CONDA_ENV=/path/to/eligos2/conda/env
+ELIGOS2_SRC=/path/to/eligos2/patched/src
+SCRATCH=/path/to/scratch/eligos2
+LOG_DIR=/path/to/logs
+OUT_BASE=/path/to/output
+
+# BAM paths per comparison (set these to your preprocessed/pooled BAMs)
+TEST_BAM_8Gy=/path/to/8Gy_3hr.preprocess.bam
+CTRL_BAM_8Gy=/path/to/mock_pooled.bam
+TEST_BAM_4Gy=/path/to/4Gy_2wk_pooled.bam
+CTRL_BAM_4Gy=/path/to/mock_pooled.bam
+# ============================================================
+
+set -euo pipefail
+trap 'echo "[$(date)] ERROR at line ${LINENO}. Exiting."' ERR
+
+# --- arguments ---
+CHROM=${1:?Usage: sbatch eligos2_bychrom.sh <chrom> <comparison>}
+COMPARISON=${2:?Usage: sbatch eligos2_bychrom.sh <chrom> <comparison>}
+
+# --- validate comparison ---
+if [[ "$COMPARISON" != "8Gy_3hr" && "$COMPARISON" != "4Gy_2wk" ]]; then
+    echo "ERROR: comparison must be 8Gy_3hr or 4Gy_2wk"
+    exit 1
+fi
+
+# --- activate patched ELIGOS2 environment ---
+# Note: set -e is temporarily disabled around conda activate since it can
+# return a non-zero exit code in batch environments, causing silent script exit
+set +e
+source "$CONDA_INIT"
+conda activate "$CONDA_ENV"
+set -e
+export PATH="$ELIGOS2_SRC:$ELIGOS2_SRC/Scripts:$PATH"
+
+# confirm environment activated correctly
+echo "[$(date)] Using eligos2: $(which eligos2)"
+echo "[$(date)] Using samtools: $(which samtools)"
+
+# --- paths ---
+THREADS=$SLURM_CPUS_PER_TASK
+WORK_DIR=$SCRATCH/$COMPARISON/work_bychrom/$CHROM
+SUBSET_DIR=$SCRATCH/$COMPARISON/subsets/$CHROM
+OUT_DIR=$OUT_BASE/${COMPARISON}_bychrom/$CHROM
+
+mkdir -p "$WORK_DIR" "$SUBSET_DIR" "$OUT_DIR" "$LOG_DIR"
+
+# --- redirect tmp to scratch to avoid filling node's local /tmp ---
+export TMPDIR=$SCRATCH/tmp
+mkdir -p "$TMPDIR"
+
+# --- get chromosome length from reference fai ---
+CHROM_LEN=$(awk -v c="$CHROM" '$1==c {print $2}' ${REFERENCE}.fai)
+if [ -z "$CHROM_LEN" ]; then
+    echo "ERROR: chromosome $CHROM not found in reference fai"
+    exit 1
+fi
+echo "[$(date)] Processing $CHROM (length: $CHROM_LEN) for $COMPARISON"
+
+# --- create chunked BED file (1MB chunks) ---
+# ELIGOS2 creates one worker process per BED row. Using 1MB chunks keeps
+# per-worker memory at ~2.8GB (confirmed via testing), so 8 threads = ~22GB total.
+# Without chunking, a whole chromosome uses ~96GB and causes OOM.
+CHUNK_SIZE=1000000
+CHROM_BED=$SCRATCH/$COMPARISON/beds/${CHROM}.bed
+mkdir -p "$SCRATCH/$COMPARISON/beds"
+
+python3 -c "
+chrom = '$CHROM'
+chrom_len = $CHROM_LEN
+chunk_size = $CHUNK_SIZE
+start = 0
+chunk_num = 1
+while start < chrom_len:
+    end = min(start + chunk_size, chrom_len)
+    name = f'{chrom}_chunk{chunk_num}'
+    print(f'{chrom}\t{start}\t{end}\t{name}\t0\t+')
+    start = end
+    chunk_num += 1
+" > "$CHROM_BED"
+
+NUM_CHUNKS=$(wc -l < "$CHROM_BED")
+echo "[$(date)] Created $NUM_CHUNKS chunks of 1MB for $CHROM"
+
+# --- set source BAM paths based on comparison ---
+if [ "$COMPARISON" = "8Gy_3hr" ]; then
+    SOURCE_TEST=$TEST_BAM_8Gy
+    SOURCE_CTRL=$CTRL_BAM_8Gy
+else
+    SOURCE_TEST=$TEST_BAM_4Gy
+    SOURCE_CTRL=$CTRL_BAM_4Gy
+fi
+
+# --- subset BAMs to this chromosome only ---
+# Reduces memory from loading full BAM (~100-217GB) to just this chromosome (~3-10GB)
+TEST_BAM=$SUBSET_DIR/${CHROM}_test.bam
+CTRL_BAM=$SUBSET_DIR/${CHROM}_ctrl.bam
+
+echo "[$(date)] Subsetting test BAM to $CHROM..."
+samtools view -b -@ "$THREADS" "$SOURCE_TEST" "$CHROM" > "$TEST_BAM"
+samtools index "$TEST_BAM"
+[ -s "$TEST_BAM" ] || { echo "ERROR: test BAM is empty after subsetting $CHROM"; exit 1; }
+echo "[$(date)] Test BAM subsetted: $(samtools view -c $TEST_BAM) reads"
+
+echo "[$(date)] Subsetting control BAM to $CHROM..."
+samtools view -b -@ "$THREADS" "$SOURCE_CTRL" "$CHROM" > "$CTRL_BAM"
+samtools index "$CTRL_BAM"
+[ -s "$CTRL_BAM" ] || { echo "ERROR: ctrl BAM is empty after subsetting $CHROM"; exit 1; }
+echo "[$(date)] Control BAM subsetted: $(samtools view -c $CTRL_BAM) reads"
+
+# --- run pair_diff_mod with chunked BED ---
+echo "[$(date)] Running ELIGOS2 pair_diff_mod: $COMPARISON $CHROM vs mock ($NUM_CHUNKS chunks)..."
+eligos2 pair_diff_mod \
+    -tbam "$TEST_BAM" \
+    -cbam "$CTRL_BAM" \
+    -reg "$CHROM_BED" \
+    -ref "$REFERENCE" \
+    -o "$WORK_DIR" \
+    -t "$THREADS" \
+    --oddR 0 \
+    --esb 0 \
+    --pval 1 \
+    --adjPval 1 \
+    --min_depth 10 \
+    --max_depth 10000 \
+    --force || { echo "[$(date)] ERROR: ELIGOS2 failed for $CHROM."; exit 1; }
+
+# --- copy results to output directory ---
+echo "[$(date)] Copying results to $OUT_DIR..."
+find "$WORK_DIR" -maxdepth 1 -type f \
+    \( -name '*.txt' -o -name '*.bed' -o -name '*.bedgraph' \) \
+    -size -200M -exec cp -f {} "$OUT_DIR/" \;
+
+# --- clean up subsetted BAMs to save scratch space ---
+echo "[$(date)] Cleaning up subsetted BAMs..."
+rm -rf "$SUBSET_DIR"
+
+echo "[$(date)] Done! $CHROM results: $OUT_DIR"
