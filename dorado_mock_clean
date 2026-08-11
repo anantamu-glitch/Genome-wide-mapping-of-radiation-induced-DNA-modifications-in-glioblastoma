@@ -1,0 +1,97 @@
+#!/bin/bash
+#SBATCH --job-name=dorado_mock
+#SBATCH --account=$ACCOUNT
+#SBATCH --partition=gpu
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=$EMAIL
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --gres=gpu:v100:1
+#SBATCH --time=48:00:00
+#SBATCH --output=$LOG_DIR/dorado_%j.out
+#SBATCH --error=$LOG_DIR/dorado_%j.err
+
+# Dorado basecalling script for mock control with two replicates
+# Basecalls rep1 and rep2 sequentially, then merges into one BAM
+
+# ============================================================
+# USER CONFIGURATION — set these before running
+# ============================================================
+ACCOUNT=your_slurm_account
+EMAIL=your_email@university.edu
+LOG_DIR=/path/to/logs
+CONDA_ENV=/path/to/conda/env
+DORADO=/path/to/dorado/bin/dorado
+REFERENCE=/path/to/hg38/hg38.fa
+IN_DIR_REP1=/path/to/rep1/pod5/files
+IN_DIR_REP2=/path/to/rep2/pod5/files
+BAM_DIR=/path/to/output/bam/directory
+SAMPLE_NAME=mock_control
+MODEL_DIR=/path/to/basecalling/model
+MOD_MODEL_5mCG=/path/to/5mCG_5hmCG/methylation/model
+MOD_MODEL_6mA=/path/to/6mA/methylation/model
+# ============================================================
+
+set -euo pipefail
+trap 'echo "[$(date)] ERROR at line ${LINENO}. Exiting."' ERR
+
+module load gcc/13.3.0
+module load cuda/12.6.3
+
+source ~/.bashrc
+conda activate "$CONDA_ENV"
+
+mkdir -p "$BAM_DIR" "$LOG_DIR"
+export TMPDIR=$BAM_DIR/tmp
+mkdir -p "$TMPDIR"
+
+# --- Rep 1 ---
+echo "[$(date)] Starting Dorado basecalling on rep1..."
+$DORADO basecaller \
+    $MODEL_DIR "$IN_DIR_REP1" \
+    --verbose --reference $REFERENCE \
+    --mm2-opts "-x map-ont" \
+    --modified-bases-models $MOD_MODEL_5mCG,$MOD_MODEL_6mA \
+    > $BAM_DIR/${SAMPLE_NAME}_rep1.unsorted.bam || { echo "[$(date)] ERROR: Dorado rep1 failed."; exit 1; }
+
+samtools sort -@ $SLURM_CPUS_PER_TASK \
+    -o $BAM_DIR/${SAMPLE_NAME}_rep1.bam \
+    $BAM_DIR/${SAMPLE_NAME}_rep1.unsorted.bam
+samtools index $BAM_DIR/${SAMPLE_NAME}_rep1.bam
+rm $BAM_DIR/${SAMPLE_NAME}_rep1.unsorted.bam
+echo "[$(date)] Rep1 done. QC..."
+samtools flagstat $BAM_DIR/${SAMPLE_NAME}_rep1.bam
+
+# --- Rep 2 ---
+echo "[$(date)] Starting Dorado basecalling on rep2..."
+$DORADO basecaller \
+    $MODEL_DIR "$IN_DIR_REP2" \
+    --verbose --reference $REFERENCE \
+    --mm2-opts "-x map-ont" \
+    --modified-bases-models $MOD_MODEL_5mCG,$MOD_MODEL_6mA \
+    > $BAM_DIR/${SAMPLE_NAME}_rep2.unsorted.bam || { echo "[$(date)] ERROR: Dorado rep2 failed."; exit 1; }
+
+samtools sort -@ $SLURM_CPUS_PER_TASK \
+    -o $BAM_DIR/${SAMPLE_NAME}_rep2.bam \
+    $BAM_DIR/${SAMPLE_NAME}_rep2.unsorted.bam
+samtools index $BAM_DIR/${SAMPLE_NAME}_rep2.bam
+rm $BAM_DIR/${SAMPLE_NAME}_rep2.unsorted.bam
+echo "[$(date)] Rep2 done. QC..."
+samtools flagstat $BAM_DIR/${SAMPLE_NAME}_rep2.bam
+
+# --- Merge ---
+echo "[$(date)] Merging rep1 and rep2..."
+samtools merge -f -@ $SLURM_CPUS_PER_TASK \
+    $BAM_DIR/${SAMPLE_NAME}.unsorted.bam \
+    $BAM_DIR/${SAMPLE_NAME}_rep1.bam \
+    $BAM_DIR/${SAMPLE_NAME}_rep2.bam
+
+samtools sort -@ $SLURM_CPUS_PER_TASK \
+    -o $BAM_DIR/${SAMPLE_NAME}.bam \
+    $BAM_DIR/${SAMPLE_NAME}.unsorted.bam
+samtools index $BAM_DIR/${SAMPLE_NAME}.bam
+rm $BAM_DIR/${SAMPLE_NAME}.unsorted.bam
+
+echo "[$(date)] All done! Final BAM: $BAM_DIR/${SAMPLE_NAME}.bam"
