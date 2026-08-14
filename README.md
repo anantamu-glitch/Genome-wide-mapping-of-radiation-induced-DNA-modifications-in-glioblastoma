@@ -128,4 +128,4 @@ Dorado requires a V100 or newer GPU. Older GPUs (e.g. P100) are not compatible w
 
 ## Author
 
-Anantamurthy — Modrek Lab, USC
+Anantamurthy Rajesh — Modrek Lab, USC
