@@ -1,0 +1,92 @@
+#!/bin/bash
+# Filter ELIGOS2 pair_diff_mod results per chromosome
+# Usage: sbatch eligos2_filter.sh <comparison>
+# Example: sbatch eligos2_filter.sh 8Gy_3hr
+
+#SBATCH --job-name=eligos2_filter
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=128G
+#SBATCH --time=24:00:00
+#SBATCH --mail-type=ALL
+
+# ============================================================
+# USER CONFIGURATION — set these before running
+# ============================================================
+ACCOUNT=your_slurm_account
+EMAIL=your_email@university.edu
+SCRATCH=/path/to/scratch
+OUT_BASE=/path/to/output
+CONDA_ENV=/path/to/eligos2/conda/env
+ELIGOS2_SRC=/path/to/eligos2/patched/src
+LOG_DIR=/path/to/logs
+
+# Filtering thresholds
+PVAL=0.001
+ODDR=1.2
+MIN_DEPTH=5
+# ============================================================
+
+#SBATCH --account=$ACCOUNT
+#SBATCH --mail-user=$EMAIL
+#SBATCH --output=${LOG_DIR}/eligos2_filter_%j.out
+#SBATCH --error=${LOG_DIR}/eligos2_filter_%j.err
+
+set -euo pipefail
+trap 'echo "[$(date)] ERROR at line ${LINENO}. Exiting."' ERR
+
+COMPARISON=${1:?Usage: eligos2_filter.sh <comparison>}
+WORK_DIR=$SCRATCH/eligos2/${COMPARISON}/work_bychrom
+FILTERED_DIR=$OUT_BASE/${COMPARISON}_filtered_pval${PVAL}_oddR${ODDR}
+
+mkdir -p "$FILTERED_DIR"
+
+set +e
+source /path/to/conda/etc/profile.d/conda.sh
+conda activate "$CONDA_ENV"
+set -e
+
+export PATH="${ELIGOS2_SRC}:${ELIGOS2_SRC}/Scripts:$PATH"
+
+CHROMOSOMES="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19 chr20 chr21 chr22 chrX chrY chrM"
+
+echo "[$(date)] Starting ELIGOS2 filtering for $COMPARISON"
+echo "[$(date)] Thresholds: pval<$PVAL, oddR>$ODDR, min_depth=$MIN_DEPTH, homopolymer=True, bases=A,G,T (excluding C)"
+
+for chr in $CHROMOSOMES; do
+    combine_file=$(ls "$WORK_DIR/$chr/"*combine.txt 2>/dev/null | head -1)
+    if [ -z "$combine_file" ]; then
+        echo "  WARNING: no combine.txt found for $chr, skipping"
+        continue
+    fi
+
+    echo "  Filtering $chr..."
+    for base in A G T; do
+        eligos2 filter \
+            -i "$combine_file" \
+            --oddR $ODDR \
+            --pval $PVAL \
+            --esb 0 \
+            --homopolymer \
+            --min_depth $MIN_DEPTH \
+            -sb ${base} \
+            -p "$FILTERED_DIR/${chr}_${base}"
+    done
+
+    header_file=$(ls "$FILTERED_DIR/${chr}_A."*filtered.txt 2>/dev/null | head -1)
+    if [ -n "$header_file" ]; then
+        head -1 "$header_file" > "$FILTERED_DIR/${chr}_filtered.txt"
+        for base in A G T; do
+            filtered=$(ls "$FILTERED_DIR/${chr}_${base}."*filtered.txt 2>/dev/null | head -1)
+            if [ -n "$filtered" ]; then
+                tail -n +2 "$filtered" >> "$FILTERED_DIR/${chr}_filtered.txt"
+                rm -f "$filtered"
+            fi
+        done
+        echo "  $chr: $(( $(wc -l < "$FILTERED_DIR/${chr}_filtered.txt") - 1 )) rows"
+    fi
+done
+
+echo "[$(date)] Filtering complete!"
+echo "[$(date)] Filtered results in: $FILTERED_DIR"
