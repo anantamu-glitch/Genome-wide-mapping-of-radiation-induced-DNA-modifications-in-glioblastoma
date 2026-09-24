@@ -1,0 +1,35 @@
+#!/bin/bash
+# Merge per-chromosome filtered ELIGOS2 results into one genome-wide file
+# Usage: bash merge_filtered.sh <filtered_dir>
+# Example: bash merge_filtered.sh /path/to/output/8Gy_3hr_filtered_pval0.001_oddR1.2
+
+set -euo pipefail
+
+FILTERED_DIR=${1:?Usage: merge_filtered.sh <filtered_dir>}
+COMPARISON=$(basename "$FILTERED_DIR")
+OUT_FILE="$FILTERED_DIR/${COMPARISON}_genome_wide.txt"
+
+CHROMOSOMES="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19 chr20 chr21 chr22 chrX chrY chrM"
+
+echo "[$(date)] Merging all chromosomes into one genome-wide file..."
+echo "[$(date)] Output: $OUT_FILE"
+
+header_written=0
+
+for chr in $CHROMOSOMES; do
+    file="$FILTERED_DIR/${chr}_filtered.txt"
+    if [ ! -f "$file" ]; then
+        echo "  WARNING: $chr not found, skipping"
+        continue
+    fi
+    if [ "$header_written" -eq 0 ]; then
+        head -1 "$file" > "$OUT_FILE"
+        header_written=1
+    fi
+    tail -n +2 "$file" >> "$OUT_FILE"
+    echo "  $chr: $(( $(wc -l < "$file") - 1 )) rows"
+done
+
+total=$(( $(wc -l < "$OUT_FILE") - 1 ))
+echo "[$(date)] Done! Total rows: $total"
+echo "[$(date)] Output: $OUT_FILE"
