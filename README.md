@@ -1,4 +1,4 @@
-# Nanopore DNA Modification Detection Pipeline
+# "Genome-wide mapping of radiation-induced DNA modifications in glioblastoma"
 
 End-to-end pipeline for detecting radiation-induced DNA modifications in glioblastoma using Oxford Nanopore Technology (ONT) long-read sequencing.
 
